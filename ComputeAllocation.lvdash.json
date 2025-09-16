@@ -1,0 +1,2462 @@
+{
+  "datasets": [
+    {
+      "name": "8950e1e8",
+      "displayName": "NodeTimeline",
+      "queryLines": [
+        "WITH max_min AS (\n",
+        "  SELECT MIN(start_time) AS min_start, MAX(end_time) AS max_end\n",
+        "  FROM system.compute.node_timeline\n",
+        "), \n",
+        "date_range AS (\n",
+        "  SELECT explode(sequence(min_start, max_end, interval 1 hour)) AS running_time\n",
+        "  FROM max_min\n",
+        "),\n",
+        "unique_clusters AS (\n",
+        "  SELECT * FROM (SELECT *,\n",
+        "                  ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY create_time DESC) AS row_num FROM system.compute.clusters)\n",
+        "  WHERE\n",
+        "  row_num = 1\n",
+        ")\n",
+        "SELECT nt.*, t.core_count, t.memory_mb, t.memory_mb / 1024 as memory_gb,\n",
+        "       usr.exploration_devx.workspace_name(nt.workspace_id) AS workspace_name,\n",
+        "       dr.running_time,\n",
+        "       split_part(nt.node_type, '.', 1) as node_family,\n",
+        "       usr.cluster_source,\n",
+        "       usr.cluster_name\n",
+        "FROM system.compute.node_timeline nt\n",
+        "JOIN system.compute.node_types t ON nt.node_type = t.node_type\n",
+        "JOIN date_range dr ON nt.start_time <= dr.running_time AND nt.end_time >= dr.running_time\n",
+        "JOIN unique_clusters usr ON nt.cluster_id = usr.cluster_id\n",
+        "--WHERE usr.cluster_source = 'UI'\n",
+        "\n"
+      ]
+    },
+    {
+      "name": "f584316e",
+      "displayName": "ClusterEvents",
+      "queryLines": [
+        "select *, \n",
+        "split_part(event_type, '.', 2) as ev_type,  \n",
+        "usr.exploration_devx.workspace_name(workspace_id) AS workspace_name\n",
+        "from usr.exploration_devx.clusters_events"
+      ]
+    },
+    {
+      "name": "ed576670",
+      "displayName": "UpsizeCalculation",
+      "queryLines": [
+        "with get_event_diff as (\n",
+        "        select *,\n",
+        "           parse_json(details) as details_parsed,\n",
+        "            lag(event_timestamp) over(order by cluster_id, event_timestamp) as last_event_timestamp,\n",
+        "            lag(event_type) over(order by cluster_id, event_timestamp) as last_event_type\n",
+        "        from usr.exploration_devx.clusters_events\n",
+        "        where event_type in ('EventType.UPSIZE_COMPLETED', 'EventType.RESIZING')\n",
+        "        order by cluster_id, event_timestamp desc)\n",
+        "select *, \n",
+        "usr.exploration_devx.workspace_name(workspace_id) AS workspace_name,\n",
+        "timestampdiff(SECOND, last_event_timestamp, event_timestamp) as upsize_duration_sec,\n",
+        "timestampdiff(SECOND, last_event_timestamp, event_timestamp)/60 as upsize_duration_min,\n",
+        "timestampdiff(SECOND, last_event_timestamp, event_timestamp)/60/60 as upsize_duration_hour\n",
+        "from get_event_diff \n",
+        "where event_type = 'EventType.UPSIZE_COMPLETED'\n",
+        "and details not like '%INSUFFICIENT%'  \n",
+        "and details not like '%UNEXPECTED_LAUNCH_FAILURE%'\n",
+        "and details not like '%SPOT_INSTANCE_TERMINATION%'\n",
+        "and details_parsed:current_num_workers::int <> details_parsed:target_num_workers::int\n"
+      ]
+    },
+    {
+      "name": "e170d181",
+      "displayName": "InsufficientCapacity",
+      "queryLines": [
+        "     select *,\n",
+        "     usr.exploration_devx.workspace_name(workspace_id) AS workspace_name,\n",
+        "     split_part(event_type, '.', 2) as ev_type\n",
+        "        from usr.exploration_devx.clusters_events\n",
+        "        where  details ilike '%AWS_INSUFFICIENT_INSTANCE_CAPACITY_FAILURE%'\n",
+        "        order by cluster_id, event_timestamp desc"
+      ]
+    },
+    {
+      "name": "de4cb912",
+      "displayName": "PoolComputeAllocation",
+      "queryLines": [
+        "select *, idle_count::int + used_count::int + pending_used_count::int + pending_idle_count::int as total_nodes,\n",
+        "availability || '-' || zone_id as av_zone, \n",
+        "idle_count::int as idle_count_int,\n",
+        "used_count::int as used_count_int,\n",
+        "pending_idle_count::int as pending_idle_count_int,\n",
+        "pending_used_count::int as pending_used_count_int,\n",
+        "convert_timezone('America/Sao_Paulo', updated_at)::timestamp as updated_at_br,\n",
+        "min_idle_instances::int as min_idle_instances_int\n",
+        "from usr.compute_allocation.pool_stats\n",
+        "where instance_pool_name ilike '\\[T\\]%'"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "8fb1ce5a",
+      "displayName": "ComputeAllocation",
+      "layout": [
+        {
+          "widget": {
+            "name": "15f39c4e",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Compute Allocation"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "efc7f54e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    },
+                    {
+                      "name": "sum(core_count)",
+                      "expression": "SUM(`core_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "combo",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "count(*)",
+                        "displayName": "Nodes"
+                      }
+                    ]
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "sum(core_count)",
+                        "displayName": "Cores"
+                      }
+                    ]
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cores Vs Nodes"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "1766b835",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_workspace_name",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "workspace_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "workspace_name",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_workspace_name"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ac08a287",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "node_type",
+                      "expression": "`node_type`"
+                    },
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Time"
+                },
+                "y": {
+                  "fieldName": "count(*)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Count of Records"
+                },
+                "color": {
+                  "fieldName": "node_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "node_type"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Number of Nodes"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "315d545b",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_start_time",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "start_time_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "start_time",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_start_time"
+                  }
+                ]
+              },
+              "selection": {
+                "defaultSelection": {
+                  "range": {
+                    "dataType": "DATETIME",
+                    "min": {
+                      "value": "now-7d/d"
+                    },
+                    "max": {
+                      "value": "now/d"
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Start Time"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "392751c0",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_node_type",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "node_type",
+                      "expression": "`node_type`"
+                    },
+                    {
+                      "name": "node_type_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "node_type",
+                    "displayName": "node_type",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_node_type"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Node Type"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 1,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "b66f9c20",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "node_family",
+                      "expression": "`node_family`"
+                    },
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "sum(core_count)",
+                      "expression": "SUM(`core_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "running_time"
+                },
+                "y": {
+                  "fieldName": "sum(core_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sum of core_count"
+                },
+                "color": {
+                  "fieldName": "node_family",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "node_family"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cores Per Family"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 25,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "fa55431e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "core_count",
+                      "expression": "`core_count`"
+                    },
+                    {
+                      "name": "countdistinct(instance_id)",
+                      "expression": "COUNT(DISTINCT `instance_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "core_count",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "core_count"
+                },
+                "y": {
+                  "fieldName": "countdistinct(instance_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Nodes"
+                },
+                "color": {
+                  "fieldName": "core_count",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "core_count"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Nodes Per Core Count"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 47,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "77a62026",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Period Analisys"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 45,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f86a23aa",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Nodes"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "5e374997",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Cores"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 17,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "8bd63f4a",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "core_count",
+                      "expression": "`core_count`"
+                    },
+                    {
+                      "name": "node_family",
+                      "expression": "`node_family`"
+                    },
+                    {
+                      "name": "countdistinct(instance_id)",
+                      "expression": "COUNT(DISTINCT `instance_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "node_family",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "node_family"
+                },
+                "y": {
+                  "fieldName": "countdistinct(instance_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Nodes"
+                },
+                "color": {
+                  "fieldName": "core_count",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "core_count"
+                },
+                "label": {
+                  "show": false
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Nodes Per Family"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 47,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "3b7fdd52",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "sum(core_count)",
+                      "expression": "SUM(`core_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "running_time"
+                },
+                "y": {
+                  "fieldName": "sum(core_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sum of core_count"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Number of Cores"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "8b7c43ee",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "sum(memory_gb)",
+                      "expression": "SUM(`memory_gb`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "running_time"
+                },
+                "y": {
+                  "fieldName": "sum(memory_gb)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sum of memory_gb"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Provisioned Memory"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 33,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "ece020c6",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Memory"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 31,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "cc7b34de",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "node_family",
+                      "expression": "`node_family`"
+                    },
+                    {
+                      "name": "running_time",
+                      "expression": "`running_time`"
+                    },
+                    {
+                      "name": "sum(memory_gb)",
+                      "expression": "SUM(`memory_gb`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "running_time",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "running_time"
+                },
+                "y": {
+                  "fieldName": "sum(memory_gb)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sum of memory_gb"
+                },
+                "color": {
+                  "fieldName": "node_family",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "node_family"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Memory Per Family"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 39,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "398af30a",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_cluster_source",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "cluster_source",
+                      "expression": "`cluster_source`"
+                    },
+                    {
+                      "name": "cluster_source_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "cluster_source",
+                    "displayName": "cluster_source",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f00bce0acf1a19835a337d0135c342_cluster_source"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Source"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 1,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "9138ec1f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "8950e1e8",
+                  "fields": [
+                    {
+                      "name": "countdistinct(instance_id)",
+                      "expression": "COUNT(DISTINCT `instance_id`)"
+                    },
+                    {
+                      "name": "node_family",
+                      "expression": "`node_family`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "countdistinct(instance_id)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Count of Unique instance_id"
+                },
+                "color": {
+                  "fieldName": "node_family",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "node_family"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Compute By Family"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 53,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "56b81df4",
+      "displayName": "ComputeEvents",
+      "layout": [
+        {
+          "widget": {
+            "name": "46b34563",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "count(ev_type)",
+                      "expression": "COUNT(`ev_type`)"
+                    },
+                    {
+                      "name": "ev_type",
+                      "expression": "`ev_type`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "count(ev_type)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Count of ev_type"
+                },
+                "color": {
+                  "fieldName": "ev_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "ev_type"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 17,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "3499775d",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "ev_type",
+                      "expression": "`ev_type`"
+                    },
+                    {
+                      "name": "count(ev_type)",
+                      "expression": "COUNT(`ev_type`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "ev_type",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "ev_type"
+                },
+                "y": {
+                  "fieldName": "count(ev_type)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Count of ev_type"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 10,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "d24ccc0a",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_workspace_name",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "workspace_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_workspace_name",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "workspace_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_workspace_name",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "workspace_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "workspace_name",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_workspace_name"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "workspace_name",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_workspace_name"
+                  },
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "workspace_name",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_workspace_name"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              },
+              "selection": {
+                "defaultSelection": {
+                  "values": {
+                    "dataType": "STRING",
+                    "values": [
+                      {
+                        "value": "general"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "3d0f5358",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_source",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "source_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_source",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "source_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_source",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "source_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "source",
+                    "displayName": "source",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_source"
+                  },
+                  {
+                    "fieldName": "source",
+                    "displayName": "source",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_source"
+                  },
+                  {
+                    "fieldName": "source",
+                    "displayName": "source",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_source"
+                  }
+                ]
+              },
+              "selection": {
+                "defaultSelection": {
+                  "values": {
+                    "dataType": "STRING",
+                    "values": [
+                      {
+                        "value": "JOB"
+                      }
+                    ]
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Source"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "7713585a",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`ev_type` IN ('NODES_LOST')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)",
+                  "displayName": "Count of Records"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Nodes Lost Events"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "18acbd8d",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_event_timestamp",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "event_timestamp",
+                      "expression": "`event_timestamp`"
+                    },
+                    {
+                      "name": "event_timestamp_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_event_timestamp",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "event_timestamp",
+                      "expression": "`event_timestamp`"
+                    },
+                    {
+                      "name": "event_timestamp_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_event_timestamp",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "event_timestamp",
+                      "expression": "`event_timestamp`"
+                    },
+                    {
+                      "name": "event_timestamp_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "event_timestamp",
+                    "displayName": "event_timestamp",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_event_timestamp"
+                  },
+                  {
+                    "fieldName": "event_timestamp",
+                    "displayName": "event_timestamp",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_event_timestamp"
+                  },
+                  {
+                    "fieldName": "event_timestamp",
+                    "displayName": "event_timestamp",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_event_timestamp"
+                  }
+                ]
+              },
+              "selection": {
+                "defaultSelection": {
+                  "range": {
+                    "dataType": "DATETIME",
+                    "min": {
+                      "value": "now-7d/d"
+                    },
+                    "max": {
+                      "value": "now/d"
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Event Date"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "78ab6df7",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_job_id",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "job_id",
+                      "expression": "`job_id`"
+                    },
+                    {
+                      "name": "job_id_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_job_id",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "job_id",
+                      "expression": "`job_id`"
+                    },
+                    {
+                      "name": "job_id_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_job_id",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "job_id",
+                      "expression": "`job_id`"
+                    },
+                    {
+                      "name": "job_id_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "job_id",
+                    "displayName": "job_id",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_job_id"
+                  },
+                  {
+                    "fieldName": "job_id",
+                    "displayName": "job_id",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_job_id"
+                  },
+                  {
+                    "fieldName": "job_id",
+                    "displayName": "job_id",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_job_id"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workflow Id"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "a7cda4d5",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_job_run",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "job_run",
+                      "expression": "`job_run`"
+                    },
+                    {
+                      "name": "job_run_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_job_run",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "job_run",
+                      "expression": "`job_run`"
+                    },
+                    {
+                      "name": "job_run_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              },
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_job_run",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "job_run",
+                      "expression": "`job_run`"
+                    },
+                    {
+                      "name": "job_run_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "job_run",
+                    "displayName": "job_run",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0193bd7a71fd3971be081b4c8d707_job_run"
+                  },
+                  {
+                    "fieldName": "job_run",
+                    "displayName": "job_run",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f019531fe91749a334e033507a8859_job_run"
+                  },
+                  {
+                    "fieldName": "job_run",
+                    "displayName": "job_run",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f0195526a614d28cde071c4af8db1a_job_run"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Job Run Id"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 3,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "e63007d7",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`ev_type` IN ('EXPANDED_DISK')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)",
+                  "displayName": "Count of Records"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Disk Expansion"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 4,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "fbfc62fa",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "f584316e",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`ev_type` IN ('DRIVER_NOT_RESPONDING')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)",
+                  "displayName": "Count of Records"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Driver not responding"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 4,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ee250024",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "max(upsize_duration_min)",
+                      "expression": "MAX(`upsize_duration_min`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "max(upsize_duration_min)",
+                  "displayName": "Maximum upsize_duration_min"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Max Upsize Time",
+                "showDescription": true,
+                "description": "Minutes"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "23b45c37",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "avg(upsize_duration_sec)",
+                      "expression": "AVG(`upsize_duration_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "avg(upsize_duration_sec)",
+                  "displayName": "Average upsize_duration_sec"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Avg Upsize Time",
+                "showDescription": true,
+                "description": "Sec"
+              }
+            }
+          },
+          "position": {
+            "x": 1,
+            "y": 7,
+            "width": 1,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "3e0259eb",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Cluster Events Stats"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "0426c724",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "median(upsize_duration_sec)",
+                      "expression": "MEDIAN(`upsize_duration_sec`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "median(upsize_duration_sec)",
+                  "displayName": "Median of upsize_duration_sec"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Median Upsize Time",
+                "showDescription": true,
+                "description": "Sec"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 7,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "8cc10d18",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "e170d181",
+                  "fields": [
+                    {
+                      "name": "count(*)",
+                      "expression": "COUNT(`*`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(*)",
+                  "displayName": "Count of Records"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Insufficient Capacity",
+                "showDescription": true,
+                "description": "Compute"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 4,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "5cdfb376",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ed576670",
+                  "fields": [
+                    {
+                      "name": "sum(upsize_duration_hour)",
+                      "expression": "SUM(`upsize_duration_hour`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(upsize_duration_hour)",
+                  "displayName": "Sum of upsize_duration_hour"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Upsize time spent",
+                "showDescription": true,
+                "description": "Hour"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 7,
+            "width": 2,
+            "height": 3
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "35ccdedc",
+      "displayName": "ComputeAvailability",
+      "layout": [
+        {
+          "widget": {
+            "name": "c3d1a7aa",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Pool Compute Allocation"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b39663a7",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "av_zone",
+                      "expression": "`av_zone`"
+                    },
+                    {
+                      "name": "secondly(updated_at_br)",
+                      "expression": "DATE_TRUNC(\"SECOND\", `updated_at_br`)"
+                    },
+                    {
+                      "name": "total_nodes",
+                      "expression": "`total_nodes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "secondly(updated_at_br)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "updated_at_br"
+                },
+                "y": {
+                  "fieldName": "total_nodes",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "total_nodes"
+                },
+                "color": {
+                  "fieldName": "av_zone",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "av_zone"
+                },
+                "label": {
+                  "show": false
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Pools Total Instances"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "abf5eade",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_instance_pool_name",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "instance_pool_name",
+                      "expression": "`instance_pool_name`"
+                    },
+                    {
+                      "name": "instance_pool_name_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "instance_pool_name",
+                    "displayName": "instance_pool_name",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_instance_pool_name"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Pool Name"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "05a5cd50",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_updated_at_br",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "updated_at_br",
+                      "expression": "`updated_at_br`"
+                    },
+                    {
+                      "name": "updated_at_br_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "updated_at_br",
+                    "displayName": "updated_at_br",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_updated_at_br"
+                  }
+                ]
+              },
+              "selection": {
+                "defaultSelection": {
+                  "range": {
+                    "dataType": "DATETIME",
+                    "min": {
+                      "value": "now-24h/h"
+                    },
+                    "max": {
+                      "value": "now/h"
+                    }
+                  }
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Start Time"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "1b0a6045",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_node_type_id",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "node_type_id",
+                      "expression": "`node_type_id`"
+                    },
+                    {
+                      "name": "node_type_id_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "node_type_id",
+                    "displayName": "node_type_id",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_node_type_id"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Node Type"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 1,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "01ed3109",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_zone_id",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "zone_id",
+                      "expression": "`zone_id`"
+                    },
+                    {
+                      "name": "zone_id_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "zone_id",
+                    "displayName": "zone_id",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_zone_id"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Zone"
+              }
+            }
+          },
+          "position": {
+            "x": 5,
+            "y": 2,
+            "width": 1,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "2c5b2df9",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "av_zone",
+                      "expression": "`av_zone`"
+                    },
+                    {
+                      "name": "minutely(updated_at)",
+                      "expression": "DATE_TRUNC(\"MINUTE\", `updated_at`)"
+                    },
+                    {
+                      "name": "idle_count_int",
+                      "expression": "`idle_count_int`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "minutely(updated_at)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "updated_at"
+                },
+                "y": {
+                  "fieldName": "idle_count_int",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "idle_count_int"
+                },
+                "color": {
+                  "fieldName": "av_zone",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "av_zone"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Idle Instances"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "21bfc470",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "av_zone",
+                      "expression": "`av_zone`"
+                    },
+                    {
+                      "name": "minutely(updated_at)",
+                      "expression": "DATE_TRUNC(\"MINUTE\", `updated_at`)"
+                    },
+                    {
+                      "name": "used_count_int",
+                      "expression": "`used_count_int`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "minutely(updated_at)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "updated_at"
+                },
+                "y": {
+                  "fieldName": "used_count_int",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "used_count_int"
+                },
+                "color": {
+                  "fieldName": "av_zone",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "av_zone"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Used Instances"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "7007f0d1",
+            "queries": [
+              {
+                "name": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_availability",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "availability",
+                      "expression": "`availability`"
+                    },
+                    {
+                      "name": "availability_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-single-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "availability",
+                    "displayName": "availability",
+                    "queryName": "dashboards/01f00bcde0f11d9688ca7303df8ac957/datasets/01f031c0ed271ea2a3e51696917e80e6_availability"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Availability"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 2,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "e20bb39e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "de4cb912",
+                  "fields": [
+                    {
+                      "name": "availability",
+                      "expression": "`availability`"
+                    },
+                    {
+                      "name": "minutely(updated_at_br)",
+                      "expression": "DATE_TRUNC(\"MINUTE\", `updated_at_br`)"
+                    },
+                    {
+                      "name": "sum(total_nodes)",
+                      "expression": "SUM(`total_nodes`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "minutely(updated_at_br)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "updated_at_br"
+                },
+                "y": {
+                  "fieldName": "sum(total_nodes)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Sum of total_nodes"
+                },
+                "color": {
+                  "fieldName": "availability",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "availability"
+                },
+                "label": {
+                  "show": false
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Pools Total Instances"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ],
+  "uiSettings": {
+    "locale": "pt-BR",
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    }
+  }
+}

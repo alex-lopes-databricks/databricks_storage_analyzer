@@ -24,4 +24,5 @@ resources:
           default: "main.default"
         - name: num_requests
           default: "30"
-        
+      run_as:
+        service_principal_name: 467c84b2-59ec-4a8a-8ba7-bdbd966442fc
